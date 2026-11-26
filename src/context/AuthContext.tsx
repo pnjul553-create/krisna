@@ -1,12 +1,22 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { UserProfile } from '../types';
-import { apiFetch } from '../lib/api';
+import { apiFetch, setAuthToken } from '../lib/api';
+
+interface AuthStatusResponse {
+  provider: 'supabase' | 'sqlite';
+  hasUsers: boolean;
+  schemaReady?: boolean;
+  schemaError?: string | null;
+}
 
 interface AuthContextValue {
   user: UserProfile | null;
   loading: boolean;
-  provider: 'supabase' | 'sqlite';
+  provider: 'supabase' | 'sqlite' | null;
   hasUsers: boolean;
+  schemaReady: boolean;
+  schemaError: string | null;
+  statusError: string | null;
   login: (email: string, password: string) => Promise<UserProfile>;
   registerFirstAdmin: (payload: { email: string; password: string; full_name: string; nip?: string }) => Promise<UserProfile>;
   logout: () => Promise<void>;
@@ -18,14 +28,20 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
-  const [provider, setProvider] = useState<'supabase' | 'sqlite'>('sqlite');
+  const [provider, setProvider] = useState<'supabase' | 'sqlite' | null>(null);
   const [hasUsers, setHasUsers] = useState(true);
+  const [schemaReady, setSchemaReady] = useState(true);
+  const [schemaError, setSchemaError] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
 
   const refreshAuth = useCallback(async () => {
     try {
-      const status = await apiFetch<{ provider: 'supabase' | 'sqlite'; hasUsers: boolean }>('/api/auth/status');
+      setStatusError(null);
+      const status = await apiFetch<AuthStatusResponse>('/api/auth/status');
       setProvider(status.provider);
       setHasUsers(status.hasUsers);
+      setSchemaReady(status.schemaReady !== false);
+      setSchemaError(status.schemaError || null);
 
       try {
         const me = await apiFetch<{ user: UserProfile }>('/api/auth/me');
@@ -33,8 +49,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } catch {
         setUser(null);
       }
-    } catch {
+    } catch (err: any) {
       setUser(null);
+      setProvider(null);
+      setStatusError(err?.message || 'Tidak dapat terhubung ke server autentikasi.');
     } finally {
       setLoading(false);
     }
@@ -45,10 +63,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [refreshAuth]);
 
   const login = async (email: string, password: string): Promise<UserProfile> => {
-    const res = await apiFetch<{ user: UserProfile }>('/api/auth/login', {
+    const res = await apiFetch<{ user: UserProfile; token?: string }>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     });
+    if (res.token) {
+      setAuthToken(res.token);
+    }
     setUser(res.user);
     setHasUsers(true);
     return res.user;
@@ -60,18 +81,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     full_name: string;
     nip?: string;
   }): Promise<UserProfile> => {
-    const res = await apiFetch<{ user: UserProfile }>('/api/auth/register-first', {
+    const res = await apiFetch<{ user: UserProfile; token?: string }>('/api/auth/register-first', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+    if (res.token) {
+      setAuthToken(res.token);
+    }
     setUser(res.user);
     setHasUsers(true);
     return res.user;
   };
 
   const logout = async () => {
-    await apiFetch('/api/auth/logout', { method: 'POST' });
-    setUser(null);
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } finally {
+      setAuthToken(null);
+      setUser(null);
+    }
   };
 
   return (
@@ -81,6 +109,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         loading,
         provider,
         hasUsers,
+        schemaReady,
+        schemaError,
+        statusError,
         login,
         registerFirstAdmin,
         logout,

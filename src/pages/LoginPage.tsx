@@ -1,13 +1,23 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Eye, EyeOff, Lock, Mail, UserPlus } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 export default function LoginPage() {
-  const { user, loading, hasUsers, provider, login, registerFirstAdmin } = useAuth();
+  const {
+    user,
+    loading,
+    hasUsers,
+    provider,
+    schemaReady,
+    schemaError,
+    statusError,
+    login,
+    registerFirstAdmin,
+  } = useAuth();
   const navigate = useNavigate();
 
-  const [mode, setMode] = useState<'login' | 'register'>(!hasUsers ? 'register' : 'login');
+  const [mode, setMode] = useState<'login' | 'register'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
@@ -15,6 +25,12 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!loading && provider !== null) {
+      setMode(!hasUsers ? 'register' : 'login');
+    }
+  }, [loading, hasUsers, provider]);
 
   if (!loading && user) {
     return <Navigate to="/app/dashboard" replace />;
@@ -52,6 +68,8 @@ export default function LoginPage() {
       setSubmitting(false);
     }
   };
+
+  const showRegisterMode = !loading && provider !== null && !hasUsers && mode === 'register';
 
   return (
     <div className="min-h-screen bg-white grid grid-cols-1 lg:grid-cols-12">
@@ -112,22 +130,23 @@ export default function LoginPage() {
 
           <div className="mb-8">
             <h2 className="text-2xl font-extrabold tracking-tight text-slate-950">
-              {!hasUsers && mode === 'register'
-                ? 'Registrasi Admin Pertama'
-                : 'Masuk ke Portal Absensi'}
+              {showRegisterMode ? 'Registrasi Admin Pertama' : 'Masuk ke Portal Absensi'}
             </h2>
             <p className="text-sm text-slate-600 mt-1.5">
-              {!hasUsers && mode === 'register'
-                ? 'Akun pertama yang dibuat otomatis ditetapkan sebagai Administrator sistem.'
+              {showRegisterMode
+                ? 'Belum ada pengguna terdaftar. Akun pertama yang dibuat otomatis ditetapkan sebagai Administrator sistem.'
                 : 'Masukkan email dan kata sandi akun sekolah Anda.'}
             </p>
           </div>
 
-          {!hasUsers && (
+          {!loading && provider !== null && !hasUsers && (
             <div className="mb-6 flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
               <button
                 type="button"
-                onClick={() => setMode('register')}
+                onClick={() => {
+                  setError(null);
+                  setMode('register');
+                }}
                 className={`flex-1 py-2 text-xs font-semibold rounded-md transition-colors ${
                   mode === 'register' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-600'
                 }`}
@@ -136,13 +155,39 @@ export default function LoginPage() {
               </button>
               <button
                 type="button"
-                onClick={() => setMode('login')}
+                onClick={() => {
+                  setError(null);
+                  setMode('login');
+                }}
                 className={`flex-1 py-2 text-xs font-semibold rounded-md transition-colors ${
                   mode === 'login' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-600'
                 }`}
               >
                 Login
               </button>
+            </div>
+          )}
+
+          {statusError && (
+            <div
+              role="alert"
+              className="mb-5 p-3.5 rounded-lg border border-amber-200 bg-amber-50 text-sm text-amber-900"
+            >
+              Server API belum merespons ({statusError}). Pastikan aplikasi dijalankan melalui server penuh, lalu muat ulang halaman.
+            </div>
+          )}
+
+          {!loading && provider === 'supabase' && !schemaReady && (
+            <div
+              role="alert"
+              className="mb-5 p-3.5 rounded-lg border border-amber-200 bg-amber-50 text-sm text-amber-900"
+            >
+              <div className="font-semibold">Skema database Supabase belum diinisialisasi.</div>
+              <div className="mt-1 text-xs leading-relaxed">
+                Jalankan isi file <span className="font-mono">supabase/schema.sql</span> dan{' '}
+                <span className="font-mono">supabase/seed.sql</span> di Supabase Dashboard &rarr; SQL Editor terlebih dahulu.
+                {schemaError ? ` (${schemaError})` : ''}
+              </div>
             </div>
           )}
 
@@ -156,7 +201,7 @@ export default function LoginPage() {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            {!hasUsers && mode === 'register' && (
+            {showRegisterMode && (
               <>
                 <div>
                   <label htmlFor="fullName" className="block text-sm font-semibold text-slate-700 mb-1.5">
@@ -234,19 +279,19 @@ export default function LoginPage() {
 
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || loading}
               className="w-full py-2.5 px-4 text-sm font-semibold text-white bg-red-700 hover:bg-red-800 disabled:opacity-60 rounded-lg transition-colors flex items-center justify-center gap-2"
             >
-              {!hasUsers && mode === 'register' && <UserPlus className="w-4 h-4" />}
+              {showRegisterMode && <UserPlus className="w-4 h-4" />}
               {submitting
                 ? 'Memproses...'
-                : !hasUsers && mode === 'register'
+                : showRegisterMode
                 ? 'Daftarkan Admin Pertama'
                 : 'Masuk ke Aplikasi'}
             </button>
           </form>
 
-          {provider === 'sqlite' && hasUsers && (
+          {!loading && provider === 'sqlite' && hasUsers && (
             <div className="mt-8 pt-6 border-t border-slate-200">
               <p className="text-xs font-semibold text-slate-700 mb-3">
                 Akses Cepat Uji Peran (Database Lokal)

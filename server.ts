@@ -27,8 +27,10 @@ interface AuthenticatedRequest extends Request {
   user?: AuthUser;
 }
 
-const PORT = 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'smk-prima-unggul-dev-secret-2026';
+const PORT = process.env.NGINX_PORT
+  ? Number(process.env.DEFAULT_APP_PORT) || 3000
+  : Number(process.env.PORT) || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 const COOKIE_NAME = 'smk_auth_token';
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
@@ -359,11 +361,93 @@ if (!USE_SUPABASE) {
 // ==========================================
 // AUTHENTICATION MIDDLEWARE
 // ==========================================
+async function ensureSupabaseProfile(
+  client: SupabaseClient,
+  authUser: { id: string; email?: string; user_metadata?: Record<string, any> }
+): Promise<{ profile: AuthUser | null; schemaError?: string }> {
+  const { data: existing, error: fetchErr } = await client
+    .from('profiles')
+    .select('*')
+    .eq('id', authUser.id)
+    .maybeSingle();
+
+  if (fetchErr) {
+    return { profile: null, schemaError: fetchErr.message };
+  }
+  if (existing) {
+    return { profile: existing as AuthUser };
+  }
+
+  const { count, error: countErr } = await client.from('profiles').select('id', { count: 'exact', head: true });
+  if (countErr) {
+    return { profile: null, schemaError: countErr.message };
+  }
+
+  const meta = authUser.user_metadata || {};
+  const requestedRole = typeof meta.role === 'string' ? meta.role : '';
+  const role: UserRole =
+    (count ?? 0) === 0
+      ? 'admin'
+      : ['admin', 'guru', 'tenaga_kependidikan'].includes(requestedRole)
+      ? (requestedRole as UserRole)
+      : 'tenaga_kependidikan';
+
+  const cleanEmail = (authUser.email || '').trim().toLowerCase();
+  const fullName =
+    (typeof meta.full_name === 'string' && meta.full_name.trim()) ||
+    cleanEmail.split('@')[0] ||
+    'Pengguna';
+
+  const { data: created, error: insertErr } = await client
+    .from('profiles')
+    .upsert({
+      id: authUser.id,
+      email: cleanEmail,
+      full_name: fullName,
+      nip: typeof meta.nip === 'string' && meta.nip.trim() ? meta.nip.trim() : null,
+      jabatan:
+        typeof meta.jabatan === 'string' && meta.jabatan.trim()
+          ? meta.jabatan.trim()
+          : role === 'admin'
+          ? 'Administrator Utama'
+          : null,
+      role,
+    })
+    .select('*')
+    .single();
+
+  if (insertErr || !created) {
+    return { profile: null, schemaError: insertErr?.message };
+  }
+  return { profile: created as AuthUser };
+}
+
 async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   try {
-    const token = req.cookies?.[COOKIE_NAME] || req.headers.authorization?.replace('Bearer ', '');
+    const bearerHeader = req.headers.authorization?.startsWith('Bearer ')
+      ? req.headers.authorization.slice(7).trim()
+      : undefined;
+    const cookieToken = req.cookies?.[COOKIE_NAME];
+    const token = bearerHeader || cookieToken;
     if (!token) {
       return res.status(401).json({ error: 'Sesi tidak ditemukan. Silakan login terlebih dahulu.' });
+    }
+
+    if (!bearerHeader && cookieToken && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+      const hasCustomHeader = Boolean(req.headers['x-requested-with']);
+      const origin = req.headers.origin;
+      const expectedHost = (req.headers['x-forwarded-host'] as string) || req.headers.host;
+      let sameOrigin = false;
+      if (origin && expectedHost) {
+        try {
+          sameOrigin = new URL(origin).host === expectedHost;
+        } catch {
+          sameOrigin = false;
+        }
+      }
+      if (!hasCustomHeader && !sameOrigin) {
+        return res.status(403).json({ error: 'Permintaan lintas origin tidak diizinkan.' });
+      }
     }
 
     if (USE_SUPABASE && supabaseAdmin) {
@@ -371,16 +455,15 @@ async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextF
       if (authErr || !authData?.user) {
         return res.status(401).json({ error: 'Sesi berakhir atau token tidak valid.' });
       }
-      const { data: profile, error: profErr } = await supabaseAdmin
-        .from('profiles')
-        .select('*')
-        .eq('id', authData.user.id)
-        .single();
-
-      if (profErr || !profile) {
-        return res.status(401).json({ error: 'Profil pengguna tidak ditemukan.' });
+      const { profile, schemaError } = await ensureSupabaseProfile(supabaseAdmin, authData.user);
+      if (!profile) {
+        return res.status(schemaError ? 500 : 401).json({
+          error: schemaError
+            ? `Tabel profil Supabase belum siap (${schemaError}). Jalankan supabase/schema.sql terlebih dahulu.`
+            : 'Profil pengguna tidak ditemukan.',
+        });
       }
-      req.user = profile as AuthUser;
+      req.user = profile;
       return next();
     } else if (db) {
       const decoded = jwt.verify(token, JWT_SECRET) as { sub: string };
@@ -414,32 +497,60 @@ function requireRole(allowedRoles: UserRole[]) {
 // EXPRESS APPLICATION SETUP
 // ==========================================
 const app = express();
+app.set('trust proxy', 1);
 app.use(express.json());
 app.use(cookieParser());
 
-function setSessionCookie(res: Response, token: string) {
-  res.cookie(COOKIE_NAME, token, {
+function getCookieOptions(req: Request) {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '').toLowerCase();
+  const isHttps = req.secure || forwardedProto.includes('https');
+  return {
     httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
+    sameSite: isHttps ? ('none' as const) : ('lax' as const),
+    secure: isHttps,
+    ...(isHttps ? { partitioned: true } : {}),
     maxAge: 7 * 24 * 60 * 60 * 1000,
     path: '/',
-  });
+  } as any;
+}
+
+function setSessionCookie(req: Request, res: Response, token: string) {
+  res.cookie(COOKIE_NAME, token, getCookieOptions(req));
 }
 
 // 1. Auth Status
 app.get('/api/auth/status', async (_req: Request, res: Response) => {
   try {
     if (USE_SUPABASE && supabaseAdmin) {
-      const { count } = await supabaseAdmin.from('profiles').select('id', { count: 'exact', head: true });
-      return res.json({ provider: 'supabase', hasUsers: (count ?? 0) > 0 });
+      const { count, error: profErr } = await supabaseAdmin
+        .from('profiles')
+        .select('id', { count: 'exact', head: true });
+
+      if (profErr) {
+        return res.json({
+          provider: 'supabase',
+          hasUsers: false,
+          schemaReady: false,
+          schemaError: profErr.message,
+        });
+      }
+
+      let hasUsers = (count ?? 0) > 0;
+      if (!hasUsers) {
+        const { data: authList } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1 });
+        if ((authList?.users?.length ?? 0) > 0) {
+          hasUsers = true;
+        }
+      }
+
+      return res.json({ provider: 'supabase', hasUsers, schemaReady: true });
     }
     if (db) {
       const row = db.prepare('SELECT COUNT(*) as total FROM users').get() as { total: number };
-      return res.json({ provider: 'sqlite', hasUsers: row.total > 0 });
+      return res.json({ provider: 'sqlite', hasUsers: row.total > 0, schemaReady: true });
     }
-    return res.json({ provider: 'sqlite', hasUsers: false });
-  } catch (err) {
+    return res.json({ provider: 'sqlite', hasUsers: false, schemaReady: true });
+  } catch {
     return res.status(500).json({ error: 'Gagal memeriksa status sistem.' });
   }
 });
@@ -464,18 +575,26 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
         password,
       });
       if (error || !data.session || !data.user) {
-        return res.status(401).json({ error: 'Email atau kata sandi salah.' });
+        const msg = (error?.message || '').toLowerCase();
+        if (msg.includes('email not confirmed')) {
+          return res.status(401).json({
+            error: 'Email akun belum dikonfirmasi di Supabase Auth. Konfirmasi user di Supabase Dashboard lalu coba lagi.',
+          });
+        }
+        return res.status(401).json({ error: 'Email atau kata sandi salah, atau akun belum terdaftar.' });
       }
-      const { data: profile, error: profErr } = await supabaseAdmin
-        .from('profiles')
-        .select('*')
-        .eq('id', data.user.id)
-        .single();
-      if (profErr || !profile) {
-        return res.status(403).json({ error: 'Profil peran belum terdaftar.' });
+
+      const { profile, schemaError } = await ensureSupabaseProfile(supabaseAdmin, data.user);
+      if (!profile) {
+        return res.status(500).json({
+          error: schemaError
+            ? `Tabel profil Supabase belum siap (${schemaError}). Jalankan file supabase/schema.sql di Supabase SQL Editor.`
+            : 'Gagal memuat profil peran pengguna.',
+        });
       }
-      setSessionCookie(res, data.session.access_token);
-      return res.json({ user: profile });
+
+      setSessionCookie(req, res, data.session.access_token);
+      return res.json({ user: profile, token: data.session.access_token });
     }
 
     if (db) {
@@ -487,9 +606,9 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
         return res.status(401).json({ error: 'Email atau kata sandi salah.' });
       }
       const token = jwt.sign({ sub: row.id, role: row.role }, JWT_SECRET, { expiresIn: '7d' });
-      setSessionCookie(res, token);
+      setSessionCookie(req, res, token);
       const { password_hash: _ph, ...user } = row;
-      return res.json({ user });
+      return res.json({ user, token });
     }
 
     return res.status(500).json({ error: 'Server tidak terkonfigurasi.' });
@@ -516,10 +635,21 @@ app.post('/api/auth/register-first', async (req: Request, res: Response) => {
     const cleanEmail = email.trim().toLowerCase();
 
     if (USE_SUPABASE && supabaseAdmin && supabasePublic) {
-      const { count } = await supabaseAdmin.from('profiles').select('id', { count: 'exact', head: true });
-      if ((count ?? 0) > 0) {
-        return res.status(403).json({ error: 'Admin pertama sudah terdaftar. Hubungi Admin untuk membuat akun baru.' });
+      const { count, error: countErr } = await supabaseAdmin
+        .from('profiles')
+        .select('id', { count: 'exact', head: true });
+      if (countErr) {
+        return res.status(400).json({
+          error: `Tabel database Supabase belum tersedia (${countErr.message}). Jalankan isi file supabase/schema.sql di SQL Editor Supabase terlebih dahulu.`,
+        });
       }
+      const { data: authList } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1 });
+      if ((count ?? 0) > 0 || (authList?.users?.length ?? 0) > 0) {
+        return res.status(403).json({
+          error: 'Akun pertama sudah terdaftar di Supabase. Silakan masuk melalui tab Login atau hubungi Admin.',
+        });
+      }
+
       const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
         email: cleanEmail,
         password,
@@ -534,21 +664,15 @@ app.post('/api/auth/register-first', async (req: Request, res: Response) => {
       if (createErr || !created.user) {
         return res.status(400).json({ error: createErr?.message || 'Gagal mendaftarkan admin pertama.' });
       }
-      // Ensure profile exists with role 'admin'
-      await supabaseAdmin.from('profiles').upsert({
-        id: created.user.id,
-        email: cleanEmail,
-        full_name: full_name.trim(),
-        nip: nip?.trim() || null,
-        jabatan: 'Administrator Utama',
-        role: 'admin',
-      });
+      const { profile } = await ensureSupabaseProfile(supabaseAdmin, created.user);
       const { data: loginData } = await supabasePublic.auth.signInWithPassword({ email: cleanEmail, password });
       if (loginData.session) {
-        setSessionCookie(res, loginData.session.access_token);
+        setSessionCookie(req, res, loginData.session.access_token);
       }
-      const { data: profile } = await supabaseAdmin.from('profiles').select('*').eq('id', created.user.id).single();
-      return res.status(201).json({ user: profile });
+      return res.status(201).json({
+        user: profile,
+        token: loginData.session?.access_token,
+      });
     }
 
     if (db) {
@@ -566,8 +690,8 @@ app.post('/api/auth/register-first', async (req: Request, res: Response) => {
         .prepare('SELECT id, email, full_name, nip, jabatan, role, created_at FROM users WHERE id = ?')
         .get(id) as AuthUser;
       const token = jwt.sign({ sub: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
-      setSessionCookie(res, token);
-      return res.status(201).json({ user });
+      setSessionCookie(req, res, token);
+      return res.status(201).json({ user, token });
     }
 
     return res.status(500).json({ error: 'Database tidak tersedia.' });
@@ -577,8 +701,9 @@ app.post('/api/auth/register-first', async (req: Request, res: Response) => {
 });
 
 // 5. Logout
-app.post('/api/auth/logout', (_req: Request, res: Response) => {
-  res.clearCookie(COOKIE_NAME, { path: '/' });
+app.post('/api/auth/logout', (req: Request, res: Response) => {
+  const { maxAge: _maxAge, ...clearOpts } = getCookieOptions(req);
+  res.clearCookie(COOKIE_NAME, clearOpts);
   return res.json({ ok: true });
 });
 
@@ -1606,6 +1731,10 @@ app.delete('/api/users/:id', requireAuth, requireRole(['admin']), async (req: Au
 // ==========================================
 // VITE MIDDLEWARE & SPA FALLBACK
 // ==========================================
+app.all('/api/*', (_req: Request, res: Response) => {
+  return res.status(404).json({ error: 'Endpoint API tidak ditemukan.' });
+});
+
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({

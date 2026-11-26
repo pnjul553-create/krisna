@@ -1,15 +1,35 @@
+let inMemoryAuthToken: string | null = null;
+
+export function setAuthToken(token: string | null) {
+  inMemoryAuthToken = token;
+}
+
+export function getAuthToken(): string | null {
+  return inMemoryAuthToken;
+}
+
 export async function apiFetch<T>(url: string, options?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Requested-With': 'XMLHttpRequest',
+    ...((options?.headers as Record<string, string>) || {}),
+  };
+
+  if (inMemoryAuthToken && !headers['Authorization']) {
+    headers['Authorization'] = `Bearer ${inMemoryAuthToken}`;
+  }
+
   const res = await fetch(url, {
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options?.headers || {}),
-    },
     ...options,
+    headers,
   });
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
+    if (res.status === 401 && url !== '/api/auth/login' && url !== '/api/auth/register-first') {
+      inMemoryAuthToken = null;
+    }
     throw new Error(data.error || `Permintaan gagal (${res.status})`);
   }
   return data as T;
