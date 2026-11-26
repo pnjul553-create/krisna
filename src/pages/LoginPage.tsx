@@ -188,12 +188,25 @@ export default function LoginPage() {
               role="alert"
               className="mb-5 p-3.5 rounded-lg border border-amber-200 bg-amber-50 text-sm text-amber-900"
             >
-              <div className="font-semibold">Skema database Supabase belum diinisialisasi.</div>
-              <div className="mt-1 text-xs leading-relaxed">
-                Jalankan isi file <span className="font-mono">supabase/schema.sql</span> dan{' '}
-                <span className="font-mono">supabase/seed.sql</span> di Supabase Dashboard &rarr; SQL Editor terlebih dahulu.
-                {schemaError ? ` (${schemaError})` : ''}
-              </div>
+              {schemaError?.includes('Environment variable') ? (
+                <>
+                  <div className="font-semibold">Environment variable Supabase belum dikonfigurasi.</div>
+                  <div className="mt-1 text-xs leading-relaxed">
+                    Tambahkan <span className="font-mono">SUPABASE_URL</span>,{' '}
+                    <span className="font-mono">SUPABASE_ANON_KEY</span>, dan{' '}
+                    <span className="font-mono">SUPABASE_SERVICE_ROLE_KEY</span> di Vercel Project Settings &rarr; Environment Variables, lalu redeploy.
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="font-semibold">Skema database Supabase belum diinisialisasi.</div>
+                  <div className="mt-1 text-xs leading-relaxed">
+                    Jalankan isi file <span className="font-mono">supabase/schema.sql</span> dan{' '}
+                    <span className="font-mono">supabase/seed.sql</span> di Supabase Dashboard &rarr; SQL Editor terlebih dahulu.
+                    {schemaError ? ` (${schemaError})` : ''}
+                  </div>
+                </>
+              )}
             </div>
           )}
 
