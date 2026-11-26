@@ -9,7 +9,6 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import Database from 'better-sqlite3';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { createServer as createViteServer } from 'vite';
 
 type UserRole = 'admin' | 'guru' | 'tenaga_kependidikan';
 
@@ -1837,6 +1836,7 @@ app.all('/api/*', (_req: Request, res: Response) => {
 
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
