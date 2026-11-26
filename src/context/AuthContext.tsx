@@ -19,6 +19,7 @@ interface AuthContextValue {
   statusError: string | null;
   login: (email: string, password: string) => Promise<UserProfile>;
   registerFirstAdmin: (payload: { email: string; password: string; full_name: string; nip?: string }) => Promise<UserProfile>;
+  registerAccount: (payload: { email: string; password: string; full_name: string; nip?: string }) => Promise<UserProfile>;
   logout: () => Promise<void>;
   refreshAuth: () => Promise<void>;
 }
@@ -38,8 +39,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       setStatusError(null);
       const status = await apiFetch<AuthStatusResponse>('/api/auth/status');
+      if (status?.provider !== 'supabase' && status?.provider !== 'sqlite') {
+        throw new Error('Respons status server tidak valid.');
+      }
       setProvider(status.provider);
-      setHasUsers(status.hasUsers);
+      setHasUsers(Boolean(status.hasUsers));
       setSchemaReady(status.schemaReady !== false);
       setSchemaError(status.schemaError || null);
 
@@ -93,6 +97,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return res.user;
   };
 
+  const registerAccount = async (payload: {
+    email: string;
+    password: string;
+    full_name: string;
+    nip?: string;
+  }): Promise<UserProfile> => {
+    const res = await apiFetch<{ user: UserProfile; token?: string }>('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (res.token) {
+      setAuthToken(res.token);
+    }
+    setUser(res.user);
+    setHasUsers(true);
+    return res.user;
+  };
+
   const logout = async () => {
     try {
       await apiFetch('/api/auth/logout', { method: 'POST' });
@@ -114,6 +136,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         statusError,
         login,
         registerFirstAdmin,
+        registerAccount,
         logout,
         refreshAuth,
       }}

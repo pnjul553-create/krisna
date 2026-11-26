@@ -581,6 +581,12 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
             error: 'Email akun belum dikonfirmasi di Supabase Auth. Konfirmasi user di Supabase Dashboard lalu coba lagi.',
           });
         }
+        const { data: authList } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1 });
+        if ((authList?.users?.length ?? 0) === 0) {
+          return res.status(401).json({
+            error: 'Belum ada pengguna terdaftar di Supabase. Silakan gunakan tab "Buat Admin Pertama" untuk mendaftarkan akun Anda.',
+          });
+        }
         return res.status(401).json({ error: 'Email atau kata sandi salah, atau akun belum terdaftar.' });
       }
 
@@ -645,8 +651,8 @@ app.post('/api/auth/register-first', async (req: Request, res: Response) => {
       }
       const { data: authList } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1 });
       if ((count ?? 0) > 0 || (authList?.users?.length ?? 0) > 0) {
-        return res.status(403).json({
-          error: 'Akun pertama sudah terdaftar di Supabase. Silakan masuk melalui tab Login atau hubungi Admin.',
+        return res.status(409).json({
+          error: 'Akun pertama sudah terdaftar di Supabase. Silakan masuk melalui tab Login atau daftar akun baru.',
         });
       }
 
@@ -678,7 +684,7 @@ app.post('/api/auth/register-first', async (req: Request, res: Response) => {
     if (db) {
       const countRow = db.prepare('SELECT COUNT(*) as total FROM users').get() as { total: number };
       if (countRow.total > 0) {
-        return res.status(403).json({ error: 'Admin pertama sudah terdaftar. Hubungi Admin untuk membuat akun baru.' });
+        return res.status(409).json({ error: 'Admin pertama sudah terdaftar. Silakan masuk atau daftar akun baru.' });
       }
       const id = crypto.randomUUID();
       const hash = bcrypt.hashSync(password, 10);
@@ -697,6 +703,100 @@ app.post('/api/auth/register-first', async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Database tidak tersedia.' });
   } catch {
     return res.status(500).json({ error: 'Gagal mendaftarkan admin pertama.' });
+  }
+});
+
+// 4b. Self-Service Registration (First user gets admin; subsequent users get tenaga_kependidikan)
+app.post('/api/auth/register', async (req: Request, res: Response) => {
+  try {
+    const { email, password, full_name, nip } = req.body as {
+      email?: string;
+      password?: string;
+      full_name?: string;
+      nip?: string;
+    };
+    if (!email || !password || !full_name) {
+      return res.status(400).json({ error: 'Nama lengkap, email, dan kata sandi wajib diisi.' });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Kata sandi minimal 6 karakter.' });
+    }
+    const cleanEmail = email.trim().toLowerCase();
+
+    if (USE_SUPABASE && supabaseAdmin && supabasePublic) {
+      const { count, error: countErr } = await supabaseAdmin
+        .from('profiles')
+        .select('id', { count: 'exact', head: true });
+      if (countErr) {
+        return res.status(400).json({
+          error: `Tabel database Supabase belum tersedia (${countErr.message}). Jalankan isi file supabase/schema.sql di SQL Editor Supabase terlebih dahulu.`,
+        });
+      }
+
+      const { data: authList } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1 });
+      const isFirstUser = (count ?? 0) === 0 && (authList?.users?.length ?? 0) === 0;
+      const assignedRole: UserRole = isFirstUser ? 'admin' : 'tenaga_kependidikan';
+      const assignedJabatan = isFirstUser ? 'Administrator Utama' : 'Tenaga Kependidikan';
+
+      const { data: created, error: createErr } = await supabaseAdmin.auth.admin.createUser({
+        email: cleanEmail,
+        password,
+        email_confirm: true,
+        user_metadata: {
+          full_name: full_name.trim(),
+          nip: nip?.trim() || null,
+          jabatan: assignedJabatan,
+          role: assignedRole,
+        },
+      });
+      if (createErr || !created.user) {
+        const msg = (createErr?.message || '').toLowerCase();
+        if (msg.includes('already') || msg.includes('registered') || msg.includes('exists')) {
+          return res.status(409).json({
+            error: 'Email sudah terdaftar di Supabase. Silakan masuk menggunakan tab Login.',
+          });
+        }
+        return res.status(400).json({ error: createErr?.message || 'Gagal mendaftarkan akun baru.' });
+      }
+
+      const { profile } = await ensureSupabaseProfile(supabaseAdmin, created.user);
+      const { data: loginData } = await supabasePublic.auth.signInWithPassword({ email: cleanEmail, password });
+      if (loginData.session) {
+        setSessionCookie(req, res, loginData.session.access_token);
+      }
+      return res.status(201).json({
+        user: profile,
+        token: loginData.session?.access_token,
+      });
+    }
+
+    if (db) {
+      const existing = db.prepare('SELECT id FROM users WHERE lower(email) = ?').get(cleanEmail);
+      if (existing) {
+        return res.status(409).json({ error: 'Email sudah terdaftar. Silakan masuk melalui tab Login.' });
+      }
+      const countRow = db.prepare('SELECT COUNT(*) as total FROM users').get() as { total: number };
+      const isFirstUser = countRow.total === 0;
+      const assignedRole: UserRole = isFirstUser ? 'admin' : 'tenaga_kependidikan';
+      const assignedJabatan = isFirstUser ? 'Administrator Utama' : 'Tenaga Kependidikan';
+
+      const id = crypto.randomUUID();
+      const hash = bcrypt.hashSync(password, 10);
+      db.prepare(
+        `INSERT INTO users (id, email, password_hash, full_name, nip, jabatan, role) VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(id, cleanEmail, hash, full_name.trim(), nip?.trim() || null, assignedJabatan, assignedRole);
+
+      const user = db
+        .prepare('SELECT id, email, full_name, nip, jabatan, role, created_at FROM users WHERE id = ?')
+        .get(id) as AuthUser;
+      const token = jwt.sign({ sub: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+      setSessionCookie(req, res, token);
+      return res.status(201).json({ user, token });
+    }
+
+    return res.status(500).json({ error: 'Database tidak tersedia.' });
+  } catch {
+    return res.status(500).json({ error: 'Gagal mendaftarkan akun baru.' });
   }
 });
 

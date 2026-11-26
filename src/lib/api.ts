@@ -25,7 +25,27 @@ export async function apiFetch<T>(url: string, options?: RequestInit): Promise<T
     headers,
   });
 
-  const data = await res.json().catch(() => ({}));
+  const contentType = res.headers.get('content-type') || '';
+  const text = await res.text();
+  let data: any = {};
+  if (text) {
+    if (contentType.includes('application/json')) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = {};
+      }
+    } else {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        if (res.ok) {
+          throw new Error('Server API tidak aktif pada alamat ini (respons bukan JSON). Gunakan Development App URL atau deploy ulang server penuh.');
+        }
+      }
+    }
+  }
+
   if (!res.ok) {
     if (res.status === 401 && url !== '/api/auth/login' && url !== '/api/auth/register-first') {
       inMemoryAuthToken = null;

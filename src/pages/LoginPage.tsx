@@ -13,7 +13,7 @@ export default function LoginPage() {
     schemaError,
     statusError,
     login,
-    registerFirstAdmin,
+    registerAccount,
   } = useAuth();
   const navigate = useNavigate();
 
@@ -41,8 +41,8 @@ export default function LoginPage() {
     setError(null);
     setSubmitting(true);
     try {
-      if (mode === 'register' && !hasUsers) {
-        await registerFirstAdmin({ email, password, full_name: fullName, nip });
+      if (mode === 'register') {
+        await registerAccount({ email, password, full_name: fullName, nip });
       } else {
         await login(email, password);
       }
@@ -69,7 +69,7 @@ export default function LoginPage() {
     }
   };
 
-  const showRegisterMode = !loading && provider !== null && !hasUsers && mode === 'register';
+  const showRegisterForm = mode === 'register';
 
   return (
     <div className="min-h-screen bg-white grid grid-cols-1 lg:grid-cols-12">
@@ -130,29 +130,23 @@ export default function LoginPage() {
 
           <div className="mb-8">
             <h2 className="text-2xl font-extrabold tracking-tight text-slate-950">
-              {showRegisterMode ? 'Registrasi Admin Pertama' : 'Masuk ke Portal Absensi'}
+              {showRegisterForm
+                ? !hasUsers
+                  ? 'Registrasi Admin Pertama'
+                  : 'Daftar Akun Portal Absensi'
+                : 'Masuk ke Portal Absensi'}
             </h2>
             <p className="text-sm text-slate-600 mt-1.5">
-              {showRegisterMode
-                ? 'Belum ada pengguna terdaftar. Akun pertama yang dibuat otomatis ditetapkan sebagai Administrator sistem.'
+              {showRegisterForm
+                ? !hasUsers
+                  ? 'Belum ada pengguna terdaftar. Akun pertama yang dibuat otomatis ditetapkan sebagai Administrator sistem.'
+                  : 'Daftarkan akun baru untuk mendapatkan akses login ke web. Akun baru mendapat peran awal Tenaga Kependidikan dan dapat disesuaikan oleh Admin.'
                 : 'Masukkan email dan kata sandi akun sekolah Anda.'}
             </p>
           </div>
 
-          {!loading && provider !== null && !hasUsers && (
+          {!loading && provider !== null && (
             <div className="mb-6 flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
-              <button
-                type="button"
-                onClick={() => {
-                  setError(null);
-                  setMode('register');
-                }}
-                className={`flex-1 py-2 text-xs font-semibold rounded-md transition-colors ${
-                  mode === 'register' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-600'
-                }`}
-              >
-                Buat Admin Pertama
-              </button>
               <button
                 type="button"
                 onClick={() => {
@@ -163,7 +157,19 @@ export default function LoginPage() {
                   mode === 'login' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-600'
                 }`}
               >
-                Login
+                Masuk
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  setMode('register');
+                }}
+                className={`flex-1 py-2 text-xs font-semibold rounded-md transition-colors ${
+                  mode === 'register' ? 'bg-white text-red-700 shadow-sm' : 'text-slate-600'
+                }`}
+              >
+                {!hasUsers ? 'Buat Admin Pertama' : 'Daftar Akun'}
               </button>
             </div>
           )}
@@ -201,7 +207,7 @@ export default function LoginPage() {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            {showRegisterMode && (
+            {showRegisterForm && (
               <>
                 <div>
                   <label htmlFor="fullName" className="block text-sm font-semibold text-slate-700 mb-1.5">
@@ -282,11 +288,13 @@ export default function LoginPage() {
               disabled={submitting || loading}
               className="w-full py-2.5 px-4 text-sm font-semibold text-white bg-red-700 hover:bg-red-800 disabled:opacity-60 rounded-lg transition-colors flex items-center justify-center gap-2"
             >
-              {showRegisterMode && <UserPlus className="w-4 h-4" />}
+              {showRegisterForm && <UserPlus className="w-4 h-4" />}
               {submitting
                 ? 'Memproses...'
-                : showRegisterMode
-                ? 'Daftarkan Admin Pertama'
+                : showRegisterForm
+                ? !hasUsers
+                  ? 'Daftarkan Admin Pertama'
+                  : 'Daftar & Masuk'
                 : 'Masuk ke Aplikasi'}
             </button>
           </form>
